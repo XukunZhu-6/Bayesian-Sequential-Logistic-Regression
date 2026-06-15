@@ -1,0 +1,105 @@
+---
+title: "example"
+author: "Xukun Zhu"
+date: "2026-04-08"
+output: html_document
+---
+
+```{r}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+```
+
+# 1.Data Simulation
+```{r}
+set.seed(2026)
+N <- 500      
+J <- 5        
+P_tv <- 2      
+P_fixed <- 2   
+
+# Generate Fixed Covariates (N x P_fixed)
+X_fixed <- matrix(rnorm(N * P_fixed), nrow = N, ncol = P_fixed)
+
+# Generate Time-Varying Covariates for each transition (N x P_tv)
+# Simulating slightly varying values across stages for the same patient
+X_tv_stage1 <- matrix(rnorm(N * P_tv), nrow = N)
+X_tv_stage2 <- X_tv_stage1 + matrix(rnorm(N * P_tv, 0, 0.1), nrow = N)
+X_tv_stage3 <- X_tv_stage2 + matrix(rnorm(N * P_tv, 0, 0.1), nrow = N)
+X_tv_stage4 <- X_tv_stage3 + matrix(rnorm(N * P_tv, 0, 0.1), nrow = N)
+
+# Define the Mask Matrix for time-varying covariates (P_tv x 4)
+# Let's simulate structural missingness: 
+# Covariate 1 (e.g., BMI) is measured at all 4 transitions (1, 1, 1, 1)
+# Covariate 2 (e.g., MELD) is structurally missing at transition 1 (0, 1, 1, 1)
+mask_tv <- matrix(c(1, 1, 1, 1,
+                    0, 1, 1, 1), nrow = P_tv, byrow = TRUE)
+
+# Simulate True Parameters
+true_beta_fixed <- c(0.5, -0.3)
+true_beta_tv    <- c(-0.2, 0.8)
+
+# Generate the Categorical Outcome Y based on the sequential logit probabilities
+Y <- numeric(N)
+for (i in 1:N) {
+  logit_p <- numeric(J - 1)
+  
+  # Calculate linear predictors (incorporating the mask mechanism)
+  logit_p[1] <- sum(X_tv_stage1[i, ] * (true_beta_tv * mask_tv[, 1])) + sum(X_fixed[i, ] * true_beta_fixed)
+  logit_p[2] <- sum(X_tv_stage2[i, ] * (true_beta_tv * mask_tv[, 2])) + sum(X_fixed[i, ] * true_beta_fixed)
+  logit_p[3] <- sum(X_tv_stage3[i, ] * (true_beta_tv * mask_tv[, 3])) + sum(X_fixed[i, ] * true_beta_fixed)
+  logit_p[4] <- sum(X_tv_stage4[i, ] * (true_beta_tv * mask_tv[, 4])) + sum(X_fixed[i, ] * true_beta_fixed)
+  
+  # Convert to conditional probabilities (inv_logit)
+  cond_prob <- plogis(logit_p)
+  
+  # Convert conditional probabilities to categorical probabilities (pi)
+  pi <- numeric(J)
+  prod_term <- 1.0
+  for (j in 1:(J - 1)) {
+    pi[j] <- prod_term * (1 - cond_prob[j])
+    prod_term <- prod_term * cond_prob[j]
+  }
+  pi[J] <- prod_term
+  
+  # Sample the final stage Y[i] based on pi
+  Y[i] <- sample(1:J, size = 1, prob = pi)
+}
+```
+
+# 2. Model Fitting
+```{r}
+stan_data <- list(
+  N = N,
+  P_tv = P_tv,
+  P_fixed = P_fixed,
+  J = J,
+  X_tv_stage1 = X_tv_stage1,
+  X_tv_stage2 = X_tv_stage2,
+  X_tv_stage3 = X_tv_stage3,
+  X_tv_stage4 = X_tv_stage4,
+  X_fixed = X_fixed,
+  mask_tv = mask_tv,
+  Y = Y
+)
+
+compiled_model <- stan_model(file = 'Bayesian Sequential Logistic Regression.stan')
+
+fit <- sampling(
+  object = compiled_model,  
+  data = stan_data,
+  iter = 2000,            
+  warmup = 1000,
+  chains = 4
+)
+```
+
+```{r}
+print(fit, pars = c("beta_fixed_global", "beta_tv_global"))
+```
+
+```{r}
+traceplot(fit, pars = c("beta_fixed_global"))
+```
+
